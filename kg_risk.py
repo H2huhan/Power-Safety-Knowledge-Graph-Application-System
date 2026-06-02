@@ -62,7 +62,7 @@ class KGRiskPredictor:
         self.db = self.client.db(db_name, username=username, password=password)
         
         knowledge_path = "./knowledge.json"
-        extract_model_path = "./mengzi-t5-best"
+        extract_model_path = "/home/hh/seq2seq/mengzi-t5/mix_10_multi_10/best_model_score_0.9138"
         llm_model_path = "/home/hh/MODELS/Qwen3-8B"
         
         # 加载知识
