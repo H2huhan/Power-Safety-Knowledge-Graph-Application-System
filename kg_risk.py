@@ -65,7 +65,7 @@ class KGRiskPredictor:
         extract_model_path = "/home/hh/seq2seq/mengzi-t5/mix_10_multi_10/best_model_score_0.9138"
         llm_model_path = "/home/hh/MODELS/Qwen3-8B"
         
-        # 加载知识
+        # 读取知识
         self.knowledge = self.load_knowledge_from_graph(knowledge_path)
         print("成功读取知识图谱!")
 
