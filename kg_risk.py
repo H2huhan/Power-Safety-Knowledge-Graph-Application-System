@@ -2,9 +2,11 @@
 from arango import ArangoClient
 import re
 import torch
+import numpy as np
 from typing import Dict, List, Set, Tuple
 from dataclasses import dataclass, field
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+from sentence_transformers import SentenceTransformer
 import json
 
 
@@ -64,6 +66,7 @@ class KGRiskPredictor:
         knowledge_path = "./knowledge.json"
         extract_model_path = "/home/hh/seq2seq/mengzi-t5/mix_10_multi_10/best_model_score_0.9138"
         llm_model_path = "/home/hh/MODELS/Qwen3-8B"
+        embedding_model_path = "/disk3/lsp/Power-Safety-Knowledge-Graph-Application-System/sentence-transformers/all-mpnet-base-v2"
         
         # 读取知识
         self.knowledge = self.load_knowledge_from_graph(knowledge_path)
@@ -87,12 +90,66 @@ class KGRiskPredictor:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         print("成功加载大模型!")
 
+        # 加载 SentenceTransformer 并预计算知识库向量
+        self.embedder = None
+        self.knowledge_embeddings = None
+        try:
+            self.embedder = SentenceTransformer(embedding_model_path)
+            self._build_knowledge_embeddings()
+            print("成功加载向量编码器并预计算知识库向量!")
+        except Exception as e:
+            print(f"[WARNING] SentenceTransformer 加载失败，将使用 Jaccard fallback: {e}")
+
     def load_knowledge_from_graph(self, file_path):
         "加载知识图谱中的知识"
         with open(file_path, "r") as f:
             datas = json.load(f)
         return datas
- 
+
+    def _encode_knowledge_text(self, know_item):
+        """将一条知识的实体组和风险组拼接为可编码的中文文本"""
+        text = know_item.get("文本", "")
+        entities = know_item.get("实体组", {})
+        risks = know_item.get("风险组", [])
+
+        parts = [f"文本：{text}"]
+        for key in ["电压等级", "设备名称", "工作内容"]:
+            values = entities.get(key, [])
+            if values:
+                parts.append(f"{key}：{'、'.join(values)}")
+        if risks:
+            parts.append(f"风险：{'、'.join(risks)}")
+        return "；".join(parts)
+
+    def _build_knowledge_embeddings(self):
+        """启动时批量编码整个 knowledge 列表，缓存为 numpy 数组"""
+        texts = [self._encode_knowledge_text(know) for know in self.knowledge]
+        self.knowledge_embeddings = self.embedder.encode(
+            texts,
+            show_progress_bar=True,
+            convert_to_numpy=True
+        )
+        print(f"预计算完成，知识库向量维度: {self.knowledge_embeddings.shape}")
+
+    def _get_candidates_by_vector(self, query_text, topk):
+        """向量余弦相似度检索，返回与 Jaccard 相同结构的候选列表"""
+        query_embedding = self.embedder.encode([query_text], convert_to_numpy=True)[0]
+
+        # cosine similarity（mpnet 输出已近似归一化）
+        similarities = np.dot(self.knowledge_embeddings, query_embedding)
+        # 归一化保证 cosine 范围在 [-1, 1]
+        norms = np.linalg.norm(self.knowledge_embeddings, axis=1) * np.linalg.norm(query_embedding)
+        similarities = similarities / np.clip(norms, a_min=1e-8, a_max=None)
+
+        top_indices = np.argsort(similarities)[::-1][:topk]
+        return [
+            {
+                "knowledge": self.knowledge[int(idx)],
+                "score": round(float(similarities[idx]), 4)
+            }
+            for idx in top_indices
+        ]
+
     def extract_entities(self, text: str, max_length: int = 128):
         """从文本中抽取实体"""
         instruction = "<坠落><外力外物致伤><触电><烧、烫伤><中毒><窒息><减供负荷><电能质量不稳定><系统失稳><非正常解列><电力监控系统网络破坏><设备损坏><设备性能下降><被迫停运>实体识别:(电压等级)(设备名称)(工作内容)关系抽取:[修饰]"
@@ -157,7 +214,8 @@ class KGRiskPredictor:
         union = len(set_a | set_b)
         return intersection / union
 
-    def get_candidates(self, input_dict, topk):
+    def _get_candidates_by_jaccard(self, input_dict, topk):
+        """原有 Jaccard 检索，保留作为 fallback"""
         query = self._convert_dict_to_list(input_dict["实体组"])
 
         scored = []
@@ -168,12 +226,26 @@ class KGRiskPredictor:
                 "knowledge": know,
                 "score": round(score, 4)
             })
-        
-        # 按分数降序排序
+
         scored_sorted = sorted(scored, key=lambda x: x["score"], reverse=True)
-        # 取 TopK
-        topk_result = scored_sorted[:topk]
-        return topk_result
+        return scored_sorted[:topk]
+
+    def get_candidates(self, input_dict, topk, retrieval_method="vector"):
+        """检索入口：根据 retrieval_method 选择向量或 Jaccard 检索"""
+        if retrieval_method == "vector" and self.embedder is not None and self.knowledge_embeddings is not None:
+            try:
+                query_text = self._encode_knowledge_text(input_dict)
+                results = self._get_candidates_by_vector(query_text, topk)
+                if results and results[0]["score"] > 0:
+                    print(f"[检索] 向量检索成功，top-1 score: {results[0]['score']}")
+                    return results
+                else:
+                    print("[检索] 向量检索返回空结果，回退 Jaccard")
+            except Exception as e:
+                print(f"[检索] 向量检索失败，回退 Jaccard: {e}")
+
+        print("[检索] 使用 Jaccard 检索")
+        return self._get_candidates_by_jaccard(input_dict, topk)
 
     def llm_predict(self, messages):
         # 1. 模型推理
@@ -214,16 +286,16 @@ class KGRiskPredictor:
         except:
             return []
 
-    def predict_risks(self, input_text: str, top_k: int = 5, max_matched_texts: int = 10) -> Dict:
+    def predict_risks(self, input_text: str, top_k: int = 5, retrieval_method: str = "vector", max_matched_texts: int = 10) -> Dict:
         """基于知识图谱预测风险"""
-        
+
         # Step 1: 实体抽取
         result = self.extract_entities(input_text)
         print("\n实体抽取结果")
         print(result)
-        
+
         # Step 2: 获取知识候选集
-        knowledge_candidates = self.get_candidates(result, top_k)
+        knowledge_candidates = self.get_candidates(result, top_k, retrieval_method=retrieval_method)
         print("\n候选知识示例")
         print(knowledge_candidates[:3])
 
