@@ -707,6 +707,13 @@
                             <option value="10">10</option>
                         </select>
                     </div>
+                    <div class="flex-item">
+                        <label>知识检索方法</label>
+                        <select id="kg_method">
+                            <option value="vector" selected>向量相似度检索</option>
+                            <option value="jaccard">Jaccard 相似度检索</option>
+                        </select>
+                    </div>
                     <div class="flex-item" style="display: flex; align-items: flex-end;">
                         <button id="kg_forecast_btn" class="btn btn-success">⚠️ 风险预测</button>
                     </div>
@@ -1351,7 +1358,8 @@
         async function kgForecast() {
             const inputText = document.getElementById('kg_input').value.trim();
             const topK = parseInt(document.getElementById('kg_top_k').value);
-            
+            const method = document.getElementById('kg_method').value;
+
             if (!inputText) {
                 alert('请输入文本内容');
                 return;
@@ -1370,7 +1378,7 @@
                 const response = await fetch('/api/kg_predict', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: inputText, top_k: topK })
+                    body: JSON.stringify({ text: inputText, top_k: topK, retrieval_method: method })
                 });
                 const data = await response.json();
                 

@@ -471,13 +471,21 @@ def kg_predict():
     data = request.get_json()
     input_text = data.get('text', '').strip()
     top_k = data.get('top_k', 5)
-    
+    retrieval_method = data.get('retrieval_method', 'vector')
+
     if not input_text:
         return jsonify({'success': False, 'error': '请输入文本内容'})
-    
+
+    valid_methods = ['vector', 'jaccard']
+    if retrieval_method not in valid_methods:
+        return jsonify({
+            'success': False,
+            'error': f'检索方法参数无效，仅支持: {", ".join(valid_methods)}'
+        }), 400
+
     try:
         predictor = init_kg_predictor()
-        knowledge_candidates, final_result = predictor.predict_risks(input_text, top_k=top_k)
+        knowledge_candidates, final_result = predictor.predict_risks(input_text, top_k=top_k, retrieval_method=retrieval_method)
         
         return jsonify({
             'success': True,
